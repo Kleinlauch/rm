@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>iPad Sync</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.2.2/mqtt.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #000000;
+            --text-color: #ffffff;
+            --accent-color: #0a84ff;
+            --button-bg: #1c1c1e;
+        }
+
+        * {
+            box-sizing: border-box;
+            -webkit-font-smoothing: antialiased;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        /* Ansichten */
+        .view-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            height: 100%;
+            padding: 20px;
+            text-align: center;
+        }
+
+        /* Typografie */
+        h1 {
+            font-size: 34px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            letter-spacing: 0.5px;
+        }
+
+        p {
+            font-size: 17px;
+            color: #8e8e93;
+            margin-bottom: 32px;
+        }
+
+        .ipad-number {
+            font-size: 80px;
+            font-weight: 700;
+            color: #333333;
+            margin-top: 20px;
+        }
+
+        /* Formulare und Buttons */
+        input {
+            background-color: var(--button-bg);
+            border: 1px solid #333;
+            color: var(--text-color);
+            padding: 16px 20px;
+            border-radius: 12px;
+            font-size: 17px;
+            width: 100%;
+            max-width: 400px;
+            margin-bottom: 16px;
+            outline: none;
+            user-select: text;
+        }
+
+        input:focus {
+            border-color: var(--accent-color);
+        }
+
+        button {
+            background-color: var(--accent-color);
+            color: #fff;
+            border: none;
+            padding: 16px 32px;
+            border-radius: 12px;
+            font-size: 17px;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+            max-width: 400px;
+            margin-bottom: 12px;
+            transition: opacity 0.2s;
+        }
+
+        button:active {
+            opacity: 0.7;
+        }
+
+        .button-secondary {
+            background-color: var(--button-bg);
+            color: var(--accent-color);
+        }
+
+        /* Diskreter Sender-Wechsel Button */
+        .switch-role-btn {
+            position: absolute;
+            bottom: 30px;
+            background: transparent;
+            color: #333333;
+            font-size: 14px;
+            padding: 10px;
+            width: auto;
+        }
+
+        /* Video Layer */
+        #video-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #000;
+            z-index: 100;
+        }
+
+        iframe {
+            border: none;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Verhindert, dass Schüler das Video antippen und pausieren */
+        }
+    </style>
+</head>
+<body>
+
+    <div id="init-view" class="view-container">
+        <h1>System bereit</h1>
+        <p>Tippe, um das Gerät zu verbinden.</p>
+        <button id="btn-start-receiving">Empfang starten</button>
+        <button id="btn-switch-sender" class="switch-role-btn">Sender-Modus</button>
+    </div>
+
+    <div id="receiver-view" class="view-container hidden">
+        <h1>Verbunden</h1>
+        <p>Warte auf Signal vom Sender...</p>
+        <div id="display-number" class="ipad-number">?</div>
+    </div>
+
+    <div id="sender-view" class="view-container hidden">
+        <h1>Sender Kontrolle</h1>
+        <p id="sender-status">0 iPads verbunden</p>
+        
+        <input type="text" id="youtube-url" placeholder="YouTube Link einfügen" value="https://www.youtube.com/watch?v=dQw4w9WgXcQ">
+        
+        <button id="btn-play">Alle Abspielen</button>
+        <button id="btn-pause" class="button-secondary">Alle Pausieren</button>
+    </div>
+
+    <div id="video-layer" class="hidden">
+        <div id="yt-player"></div>
+    </div>
+
+    <script>
+        // Eindeutige ID für dieses Gerät generieren
+        const clientId = 'ipad_' + Math.random().toString(16).substring(2, 10);
+        const TOPIC_BASE = 'schul-ipad-sync-2026'; // Basis-Kanal, falls andere den Broker nutzen
+        let role = 'receiver';
+        let ipadNumber = 0;
+        let playerReady = false;
+        let player;
+
+        // --- YouTube API Setup ---
+        const tag = document.createElement('script');
+        tag.src = "https://www.youtube.com/iframe_api";
+        const firstScriptTag = document.getElementsByTagName('script')[0];
+        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+
+        function onYouTubeIframeAPIReady() {
+            player = new YT.Player('yt-player', {
+                height: '100%',
+                width: '100%',
+                videoId: '',
+                playerVars: { 
+                    'controls': 0, 
+                    'disablekb': 1, 
+                    'rel': 0,
+                    'modestbranding': 1,
+                    'iv_load_policy': 3
+                },
+                events: {
+                    'onReady': () => { playerReady = true; }
+                }
+            });
+        }
+
+        // Hilfsfunktion: YouTube ID aus Link extrahieren
+        function extractVideoID(url) {
+            const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/\s]{11})/i;
+            const match = url.match(regex);
+            return (match && match[1]) ? match[1] : 'dQw4w9WgXcQ'; // Fallback: Rickroll
+        }
+
+        // --- MQTT Setup ---
+        // Öffentlicher, stabiler Broker
+        const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+
+        let receiverCount = 0;
+
+        client.on('connect', () => {
+            console.log("Verbunden mit Signal-Server");
+        });
+
+        client.on('message', (topic, message) => {
+            const payload = JSON.parse(message.toString());
+
+            // Logik für den Sender
+            if (role === 'sender' && topic === `${TOPIC_BASE}/hello`) {
+                receiverCount++;
+                document.getElementById('sender-status').innerText = receiverCount + ' iPads verbunden';
+                // Dem neuen iPad seine Nummer zuweisen
+                client.publish(`${TOPIC_BASE}/assign/${payload.id}`, JSON.stringify({ num: receiverCount }));
+            }
+
+            // Logik für den Empfänger
+            if (role === 'receiver') {
+                if (topic === `${TOPIC_BASE}/assign/${clientId}`) {
+                    ipadNumber = payload.num;
+                    document.getElementById('display-number').innerText = ipadNumber;
+                }
+                
+                if (topic === `${TOPIC_BASE}/cmd`) {
+                    if (payload.action === 'play' && playerReady) {
+                        document.getElementById('video-layer').classList.remove('hidden');
+                        
+                        // Prüfen, ob ein neues Video geladen werden muss
+                        const currentVideoUrl = player.getVideoUrl();
+                        if (!currentVideoUrl || !currentVideoUrl.includes(payload.vid)) {
+                            player.loadVideoById(payload.vid);
+                        } else {
+                            player.playVideo();
+                        }
+                    } else if (payload.action === 'pause' && playerReady) {
+                        player.pauseVideo();
+                        document.getElementById('video-layer').classList.add('hidden');
+                    }
+                }
+            }
+        });
+
+        // --- UI Interaktionen ---
+
+        // Empfänger initialisieren (Wichtig für iOS Audio Unlock)
+        document.getElementById('btn-start-receiving').addEventListener('click', () => {
+            document.getElementById('init-view').classList.add('hidden');
+            document.getElementById('receiver-view').classList.remove('hidden');
+            
+            // Leeres Abspielen erzwingt die Audio-Freigabe im Browser
+            if (playerReady) {
+                player.playVideo();
+                setTimeout(() => player.stopVideo(), 100);
+            }
+
+            // Beim Netzwerk anmelden
+            client.subscribe(`${TOPIC_BASE}/cmd`);
+            client.subscribe(`${TOPIC_BASE}/assign/${clientId}`);
+            client.publish(`${TOPIC_BASE}/hello`, JSON.stringify({ id: clientId }));
+        });
+
+        // In den Sender-Modus wechseln
+        document.getElementById('btn-switch-sender').addEventListener('click', () => {
+            role = 'sender';
+            document.getElementById('init-view').classList.add('hidden');
+            document.getElementById('sender-view').classList.remove('hidden');
+            
+            // Als Sender auf neue iPads lauschen
+            client.subscribe(`${TOPIC_BASE}/hello`);
+        });
+
+        // Sender Befehle absetzen
+        document.getElementById('btn-play').addEventListener('click', () => {
+            const urlInput = document.getElementById('youtube-url').value;
+            const videoId = extractVideoID(urlInput);
+            client.publish(`${TOPIC_BASE}/cmd`, JSON.stringify({ action: 'play', vid: videoId }));
+        });
+
+        document.getElementById('btn-pause').addEventListener('click', () => {
+            client.publish(`${TOPIC_BASE}/cmd`, JSON.stringify({ action: 'pause' }));
+        });
+
+    </script>
+</body>
+</html>
